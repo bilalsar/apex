@@ -92,6 +92,29 @@ def _get_default_world_sizes_model_parallel_world_size(pipeline_model_parallel_w
     return tensor_model_parallel_world_size, data_parallel_size, pipeline_model_parallel_world_size
 
 
+def _destroy_model_parallel() -> None:
+    # parallel_state.destroy_model_parallel() only drops its references to the groups.
+    # Each communicator keeps its device buffers until it is destroyed, so running the
+    # dtype / deallocate loop below in one process runs a 16 GB GPU out of memory.
+    groups = []
+    for name in (
+        "_MODEL_PARALLEL_GROUP",
+        "_TENSOR_MODEL_PARALLEL_GROUP",
+        "_PIPELINE_MODEL_PARALLEL_GROUP",
+        "_DATA_PARALLEL_GROUP",
+        "_EMBEDDING_GROUP",
+        "_POSITION_EMBEDDING_GROUP",
+        "_ENCODER_RELATIVE_POSITION_EMBEDDING_GROUP",
+        "_DECODER_RELATIVE_POSITION_EMBEDDING_GROUP",
+    ):
+        group = getattr(parallel_state, name)
+        if group is not None and all(group is not g for g in groups):
+            groups.append(group)
+    for group in groups:
+        torch.distributed.destroy_process_group(group)
+    parallel_state.destroy_model_parallel()
+
+
 class PipelineParallelForwardBackwardTestBase:
 
     GLOBAL_BATCH_SIZE = 16
@@ -228,7 +251,7 @@ class PipelineParallelForwardBackwardTestBase:
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
 
-            parallel_state.destroy_model_parallel()
+            _destroy_model_parallel()
 
     def test_learning_no_pipelining(self):
         self._forward_backward_test_impl(False, forward_backward_no_pipelining, 1, None)
